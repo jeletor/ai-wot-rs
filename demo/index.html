@@ -99,7 +99,7 @@
     try {
       await init();
       scorer = new WotScorer();
-      scorer.set_now(Math.floor(Date.now() / 1000));
+      scorer.set_now(BigInt(Math.floor(Date.now() / 1000)));
       statusEl.className = 'status ready';
       statusEl.textContent = `✅ WASM loaded — ai.wot scoring engine ready`;
       btnFetch.disabled = false;
@@ -113,7 +113,7 @@
       btnFetch.disabled = true;
       fetchStatus.textContent = 'Connecting to relays...';
       scorer.clear();
-      scorer.set_now(Math.floor(Date.now() / 1000));
+      scorer.set_now(BigInt(Math.floor(Date.now() / 1000)));
 
       const events = new Map();
       const pubkeys = new Set();
@@ -164,7 +164,7 @@
 
         const ok = scorer.add_attestation(
           id, event.pubkey, pTag[1], lTag[1],
-          event.created_at,
+          BigInt(event.created_at),
           event.tags.find(t => t[0] === 'comment')?.[1] || ''
         );
         if (ok) added++;
