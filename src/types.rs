@@ -1,6 +1,22 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Get current unix timestamp, works on both native and WASM.
+fn current_timestamp() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // In WASM, default to 0 — caller must set via set_now()
+        0
+    }
+}
+
 // ─── Constants ──────────────────────────────────────────────────
 
 pub const NAMESPACE: &str = "ai.wot";
@@ -141,10 +157,7 @@ impl Default for ScoringConfig {
             max_depth: 2,
             novelty_multiplier: DEFAULT_NOVELTY_MULTIPLIER,
             negative_trust_gate: DEFAULT_NEGATIVE_TRUST_GATE,
-            now: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            now: current_timestamp(),
         }
     }
 }

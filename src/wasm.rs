@@ -11,7 +11,7 @@ use crate::scoring;
 /// Initialize panic hook for better error messages in the browser console.
 #[wasm_bindgen(start)]
 pub fn init() {
-    console_error_panic_hook::set_once();
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
 }
 
 // ─── JS-friendly wrapper types ──────────────────────────────────
