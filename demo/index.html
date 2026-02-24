@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ai.wot — Client-Side Trust Scoring</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Berkeley Mono', 'JetBrains Mono', monospace; background: #0a0a0a; color: #e0e0e0; padding: 2rem; }
+    h1 { font-size: 1.5rem; color: #a855f7; margin-bottom: 0.5rem; }
+    .subtitle { color: #666; font-size: 0.85rem; margin-bottom: 2rem; }
+    .status { padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1.5rem; font-size: 0.85rem; }
+    .status.loading { background: #1a1a2e; color: #f59e0b; }
+    .status.ready { background: #0a1a0a; color: #22c55e; }
+    .status.error { background: #1a0a0a; color: #ef4444; }
+    .section { margin-bottom: 2rem; }
+    .section h2 { font-size: 1rem; color: #888; margin-bottom: 0.75rem; }
+    .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    input, button, select { font-family: inherit; font-size: 0.85rem; padding: 0.4rem 0.8rem; border: 1px solid #333; border-radius: 4px; background: #1a1a1a; color: #e0e0e0; }
+    button { cursor: pointer; background: #a855f7; border-color: #a855f7; color: #fff; font-weight: bold; }
+    button:hover { background: #9333ea; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input { min-width: 300px; }
+    .scores { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
+    .score-card { background: #111; border: 1px solid #222; border-radius: 8px; padding: 1.25rem; }
+    .score-card .label { font-size: 0.75rem; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+    .score-card .value { font-size: 2rem; font-weight: bold; margin: 0.25rem 0; }
+    .score-card .detail { font-size: 0.75rem; color: #888; }
+    .score-card.trust .value { color: #22c55e; }
+    .score-card.attestations .value { color: #3b82f6; }
+    .score-card.diversity .value { color: #f59e0b; }
+    .score-card.category .value { color: #a855f7; }
+    .breakdown { margin-top: 1rem; }
+    .breakdown table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    .breakdown th { text-align: left; color: #666; padding: 0.4rem; border-bottom: 1px solid #222; }
+    .breakdown td { padding: 0.4rem; border-bottom: 1px solid #111; }
+    .breakdown td.positive { color: #22c55e; }
+    .breakdown td.negative { color: #ef4444; }
+    .breakdown td.gated { color: #666; text-decoration: line-through; }
+    .timing { color: #444; font-size: 0.75rem; margin-top: 0.5rem; }
+    .agent-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+    .agent-pill { padding: 0.25rem 0.75rem; border-radius: 999px; background: #1a1a1a; border: 1px solid #333; font-size: 0.8rem; cursor: pointer; }
+    .agent-pill:hover { border-color: #a855f7; }
+    .agent-pill.active { background: #a855f7; border-color: #a855f7; color: #fff; }
+  </style>
+</head>
+<body>
+  <h1>🌀 ai.wot Trust Scoring Engine</h1>
+  <p class="subtitle">Running entirely in your browser via WebAssembly. No server needed for score computation.</p>
+  
+  <div id="status" class="status loading">Loading WASM module...</div>
+
+  <div class="section">
+    <h2>1. Load Attestations from Nostr Relays</h2>
+    <div class="controls">
+      <button id="btn-fetch" disabled>Fetch from Relays</button>
+      <span id="fetch-status" style="color:#666;font-size:0.85rem;line-height:2"></span>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>2. Select Agent</h2>
+    <div id="agent-list" class="agent-list"></div>
+    <div class="controls">
+      <input id="pubkey-input" placeholder="Or paste a pubkey (hex)..." />
+      <button id="btn-score" disabled>Score</button>
+    </div>
+  </div>
+
+  <div class="section" id="results" style="display:none">
+    <h2>3. Trust Score</h2>
+    <div id="score-cards" class="scores"></div>
+    <div id="timing" class="timing"></div>
+    <div id="breakdown" class="breakdown"></div>
+  </div>
+
+  <script type="module">
+    import init, { WotScorer, compute_decay, compute_zap_weight } from './pkg/ai_wot.js';
+
+    const RELAYS = [
+      'wss://relay.damus.io',
+      'wss://nos.lol',
+      'wss://relay.primal.net',
+      'wss://relay.snort.social'
+    ];
+
+    let scorer = null;
+    let profiles = {};
+
+    const statusEl = document.getElementById('status');
+    const btnFetch = document.getElementById('btn-fetch');
+    const btnScore = document.getElementById('btn-score');
+    const fetchStatus = document.getElementById('fetch-status');
+    const agentList = document.getElementById('agent-list');
+    const pubkeyInput = document.getElementById('pubkey-input');
+    const resultsEl = document.getElementById('results');
+
+    // Init WASM
+    try {
+      await init();
+      scorer = new WotScorer();
+      scorer.set_now(Math.floor(Date.now() / 1000));
+      statusEl.className = 'status ready';
+      statusEl.textContent = `✅ WASM loaded — ai.wot scoring engine ready`;
+      btnFetch.disabled = false;
+    } catch (e) {
+      statusEl.className = 'status error';
+      statusEl.textContent = `❌ Failed to load WASM: ${e}`;
+    }
+
+    // Fetch attestations from Nostr relays via WebSocket
+    btnFetch.addEventListener('click', async () => {
+      btnFetch.disabled = true;
+      fetchStatus.textContent = 'Connecting to relays...';
+      scorer.clear();
+      scorer.set_now(Math.floor(Date.now() / 1000));
+
+      const events = new Map();
+      const pubkeys = new Set();
+      let relaysDone = 0;
+
+      await Promise.all(RELAYS.map(url => new Promise(resolve => {
+        try {
+          const ws = new WebSocket(url);
+          const subId = 'wot_' + Math.random().toString(36).slice(2, 8);
+          const timeout = setTimeout(() => { ws.close(); resolve(); }, 10000);
+
+          ws.onopen = () => {
+            ws.send(JSON.stringify(['REQ', subId, { kinds: [1985], '#L': ['ai.wot'], limit: 500 }]));
+          };
+
+          ws.onmessage = (msg) => {
+            const data = JSON.parse(msg.data);
+            if (data[0] === 'EVENT' && data[2]) {
+              const e = data[2];
+              if (!events.has(e.id)) {
+                events.set(e.id, e);
+                pubkeys.add(e.pubkey);
+                const pTag = e.tags.find(t => t[0] === 'p');
+                if (pTag) pubkeys.add(pTag[1]);
+              }
+            }
+            if (data[0] === 'EOSE') {
+              clearTimeout(timeout);
+              ws.close();
+              resolve();
+            }
+          };
+
+          ws.onerror = () => { clearTimeout(timeout); resolve(); };
+          ws.onclose = () => {
+            relaysDone++;
+            fetchStatus.textContent = `Fetched from ${relaysDone}/${RELAYS.length} relays (${events.size} unique events)...`;
+          };
+        } catch { resolve(); }
+      })));
+
+      // Parse events into scorer
+      let added = 0;
+      for (const [id, event] of events) {
+        const pTag = event.tags.find(t => t[0] === 'p');
+        const lTag = event.tags.find(t => t[0] === 'l' && t[2] === 'ai.wot');
+        if (!pTag || !lTag) continue;
+
+        const ok = scorer.add_attestation(
+          id, event.pubkey, pTag[1], lTag[1],
+          event.created_at,
+          event.tags.find(t => t[0] === 'comment')?.[1] || ''
+        );
+        if (ok) added++;
+      }
+
+      // Fetch profiles
+      fetchStatus.textContent = `Loaded ${added} attestations. Fetching profiles...`;
+      profiles = await fetchProfiles([...pubkeys]);
+
+      // Show agent pills
+      const subjects = JSON.parse(scorer.get_subjects());
+      agentList.innerHTML = '';
+      for (const pk of subjects) {
+        const pill = document.createElement('div');
+        pill.className = 'agent-pill';
+        pill.textContent = profiles[pk]?.name || pk.slice(0, 12) + '...';
+        pill.dataset.pubkey = pk;
+        pill.addEventListener('click', () => {
+          document.querySelectorAll('.agent-pill').forEach(p => p.classList.remove('active'));
+          pill.classList.add('active');
+          pubkeyInput.value = pk;
+          doScore(pk);
+        });
+        agentList.appendChild(pill);
+      }
+
+      fetchStatus.textContent = `✅ ${added} attestations from ${events.size} events, ${subjects.length} agents`;
+      btnFetch.disabled = false;
+      btnScore.disabled = false;
+    });
+
+    btnScore.addEventListener('click', () => {
+      const pk = pubkeyInput.value.trim();
+      if (pk) doScore(pk);
+    });
+
+    function doScore(pubkey) {
+      const t0 = performance.now();
+      const resultJson = scorer.calculate_score(pubkey);
+      const elapsed = performance.now() - t0;
+      const result = JSON.parse(resultJson);
+
+      // Category scores
+      const categories = {};
+      for (const cat of ['commerce', 'identity', 'code', 'general']) {
+        const catJson = scorer.calculate_category_score(pubkey, cat);
+        categories[cat] = JSON.parse(catJson);
+      }
+      const totalElapsed = performance.now() - t0;
+
+      resultsEl.style.display = 'block';
+
+      const name = profiles[pubkey]?.name || pubkey.slice(0, 16) + '...';
+
+      document.getElementById('score-cards').innerHTML = `
+        <div class="score-card trust">
+          <div class="label">Trust Score</div>
+          <div class="value">${result.display}</div>
+          <div class="detail">raw: ${result.raw.toFixed(2)} — ${name}</div>
+        </div>
+        <div class="score-card attestations">
+          <div class="label">Attestations</div>
+          <div class="value">${result.attestation_count}</div>
+          <div class="detail">${result.positive_count} positive, ${result.negative_count} negative, ${result.gated_count} gated</div>
+        </div>
+        <div class="score-card diversity">
+          <div class="label">Diversity</div>
+          <div class="value">${result.diversity?.diversity?.toFixed(2) || '0'}</div>
+          <div class="detail">${result.diversity?.unique_attesters || 0} unique attesters</div>
+        </div>
+        ${Object.entries(categories).map(([cat, s]) => `
+          <div class="score-card category">
+            <div class="label">${cat}</div>
+            <div class="value">${s.display}</div>
+            <div class="detail">${s.attestation_count} attestations</div>
+          </div>
+        `).join('')}
+      `;
+
+      document.getElementById('timing').textContent =
+        `Scored in ${elapsed.toFixed(2)}ms (all categories: ${totalElapsed.toFixed(2)}ms)`;
+
+      // Breakdown table
+      if (result.breakdown && result.breakdown.length > 0) {
+        document.getElementById('breakdown').innerHTML = `
+          <h2 style="font-size:1rem;color:#888;margin-bottom:0.5rem">Breakdown</h2>
+          <table>
+            <tr><th>Attester</th><th>Type</th><th>Weight</th><th>Decay</th><th>Contribution</th><th>Comment</th></tr>
+            ${result.breakdown.map(b => `
+              <tr>
+                <td>${profiles[b.attester]?.name || b.attester.slice(0, 12) + '...'}</td>
+                <td>${b.attestation_type}</td>
+                <td>${b.zap_weight.toFixed(1)}</td>
+                <td>${b.decay_factor.toFixed(3)}</td>
+                <td class="${b.gated ? 'gated' : b.contribution >= 0 ? 'positive' : 'negative'}">${b.contribution.toFixed(2)}${b.novelty_bonus ? ' ✨' : ''}${b.gated ? ' (gated)' : ''}</td>
+                <td style="color:#666;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.comment || '—'}</td>
+              </tr>
+            `).join('')}
+          </table>
+        `;
+      }
+    }
+
+    async function fetchProfiles(pubkeys) {
+      const result = {};
+      try {
+        const ws = new WebSocket('wss://relay.damus.io');
+        const subId = 'prof_' + Math.random().toString(36).slice(2, 8);
+        await new Promise((resolve) => {
+          const timeout = setTimeout(() => { ws.close(); resolve(); }, 5000);
+          ws.onopen = () => {
+            ws.send(JSON.stringify(['REQ', subId, { kinds: [0], authors: pubkeys.slice(0, 100) }]));
+          };
+          ws.onmessage = (msg) => {
+            const data = JSON.parse(msg.data);
+            if (data[0] === 'EVENT' && data[2]) {
+              try {
+                const meta = JSON.parse(data[2].content);
+                result[data[2].pubkey] = { name: meta.name || meta.display_name, picture: meta.picture };
+              } catch {}
+            }
+            if (data[0] === 'EOSE') { clearTimeout(timeout); ws.close(); resolve(); }
+          };
+          ws.onerror = () => { clearTimeout(timeout); resolve(); };
+        });
+      } catch {}
+      return result;
+    }
+  </script>
+</body>
+</html>

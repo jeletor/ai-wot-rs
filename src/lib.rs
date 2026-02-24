@@ -12,5 +12,8 @@
 pub mod scoring;
 pub mod types;
 
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 pub use scoring::*;
 pub use types::*;
